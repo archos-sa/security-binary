@@ -5,7 +5,18 @@ This relies as little as possible on original libstagefright's structure.
 
 This code only works on ARMv7-A devices (including 64bits processors running in 32bits), and porting isn't planned.
 Also, we expect Android's code to be built in Thumb2 mode, not ARM. If that's not the case, some minor changes has to be made.
-This code has been tested on devices ranging from 4.2 to 4.4. It should run on 4.1, and might run on Lollipop.
+This code has been tested on devices ranging from 4.2 to 4.4. It should run on 4.1, and might run on Lollipop (though this method is over-engineered for Lollipop).
+
+== Quick test ==
+
+If you just want to try it, here's a shortcut:
+ - Extract original mediaserver
+ - patchelf --add-needed libstagefright_archos.so mediaserver
+ - Look in prebuilts/ for the library that matches the most your ROM
+ - Put this library as system/lib/libstagefright_archos.so
+ - Put back the modified mediaserver to system/bin/mediaserver
+ - Test Zimperium's PoC videos (https://s3.amazonaws.com/zhafiles/Zimperium-Handset-Alliance/ZHA-Crash-PoC.zip)
+
 
 == The per-device changes needed ==
 
