@@ -6,6 +6,9 @@ This relies as little as possible on original libstagefright's structure.
 This code only works on ARMv7-A devices (including 64bits processors running in 32bits), and porting isn't planned.
 Also, we expect Android's code to be built in Thumb2 mode, not ARM. If that's not the case, some minor changes has to be made.
 This code has been tested on devices ranging from 4.2 to 4.4. It should run on 4.1, and might run on Lollipop (though this method is over-engineered for Lollipop).
+The full list of fixed CVEs matches the list on https://blog.zimperium.com/stagefright-vulnerability-details-stagefright-detector-tool-released/
+Please note that Zimperium's test app will still stay your device is vulnerable.
+This is expected. The real test is to read Zimperium's PoC videos.
 
 == Quick test ==
 
