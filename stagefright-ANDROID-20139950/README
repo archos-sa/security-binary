@@ -1,0 +1,122 @@
+This is a binary patch for the various CVEs in 2015 about libstagefright.
+This relies as little as possible on original libstagefright's structure.
+
+== Scope of those fixes ==
+
+This code only works on ARMv7-A devices (including 64bits processors running in 32bits), and porting isn't planned.
+Also, we expect Android's code to be built in Thumb2 mode, not ARM. If that's not the case, some minor changes has to be made.
+This code has been tested on devices ranging from 4.2 to 4.4. It should run on 4.1, and might run on Lollipop.
+
+== The per-device changes needed ==
+
+Some informations are required from the original libstagefright.so, else mediaserver will crash trying to read most mp4.
+Those informations are the offset of various fields in the ESDS, MPEG4Extractor and SampleTable classes.
+
+The easiest way to do that if you have original source code, is to extract original include/{ESDS,MPEG4Extractor,SampleTable}.h
+If you don't have it, then you'll have to find the offset of required fields by reverse engineering
+
+Possibly, if your device is "well known", you might not have to do that.
+First, for ESDS.h hasn't changed along all the devices I've crossed.
+Them, in MPEG4Extractor.h and SampleTable.cpp, You'll see a lot of declarations which is commented.
+The current git tree works for a 4.4.2 AOSP device.
+If you want to switch to other, you can uncomment codes.
+The comments around the if 0 have the following meaning:
+//M:{ ... //}:M means this code is for MTK devices
+//4.4.2 means this code is for AOSP 4.4.2, comment it out on 4.2 devices
+
+== How to build ==
+
+Go in an AOSP tree/frameworks/av/media/libstagefright (this has been developed on a 4.2 AOSP tree)
+Copy every .cpp available in this tree there, copy includes in libstagefright's include folder
+Edit libstagefright's Android.mk to add the code in this tree's Android.mk:
+ Add the code from line 2 to 6, at the before-last non-empty line of Android.mk
+
+Do the usual android build stuff:
+ - Go in the root of the AOSP tree-
+ - source build/envsetup.sh
+ - cd frameworks/av/media/libstagefright
+ - mma -j12
+
+Wait.
+This will generate libstagefright_archos.so in out/target/product/<name of product>/system/lib/libstagefright_archos.so
+(Most likely the name of the product will be generic, it's the default on AOSP)
+
+We need to edit the binaries which rely on libstagefright.so, to load libstagefright_archos.so:
+ - Extract original system/bin/mediaserver binary
+ - Edit it with patchelf (https://github.com/NixOS/patchelf), to make it depend on libstagefright_archos.so:
+     patchelf --add-needed libstagefright_archos.so mediaserver
+
+Then put libstagefright_archos.so in device's system/lib/, and mediaserver 
+
+== How this works ==
+
+Black magic ! Erm no sorry.
+The idea is quite simple (though hard to implement):
+Add another library requirement to mediaserver, and this library will divert calls in libstagefright.so, to itself.
+To divert the calls, there are two different, though similar, techniques used, depending on wether we reimplement the function entirely, or if we'll need to call the original code afterwards.
+
+The basic idea, is to rewrite the first instructions of the function we want to override, to execute our own function
+All the redirection code is in SampleTable-archos.cpp (sorry for the mess).
+The redirection code is executed in a "constructor" function, which is called by the linker as soon as our library is loaded.
+Our library requires to have libstagefright.so loaded when its constructor is called.
+This is simply done by having libstagefright_archos.so require libstagefright.so
+
+If we have our own implementation of the function, all the code has to do, is branch (and NOT link) to our own code, without changing any register. r0/r1/r2/r3/sp will give us the parameters for our function, lr will enable us to to return to the function calling libstagefright's function.
+If we can branch (and not link) to our own function, without changing registers, the implementation is straightforward.
+How to do that ?
+The big constrain here, is to branch without changing a register (except pc obviously), to an absolute address.
+There is one neat instruction to do such a thing, which is ldr pc, [pc, #0]. 
+This will change pc (current position in program), to be the content of the memory, right after where we are. (actually that +4)
+
+So, we only have to write in memory, ldr pc, [pc, #0]| 0xaabbcc00, at the beginning of the original function, and we're done!
+Ok not exactly. As mentioned in the beginning, ARMv7A-based Android are using Thumb2, you're not allowed to use such a trick.
+So we have to jump to ARM mode, by doing bx pc, then do ldr pc, [pc, #0]. Then we have to jump back to Thumb2 mode. Oops.
+Well this one is easy, when executing ldr pc, [pc, #0], the ARM core reads the LSB, and if it's 1, then switch to Thumb2 mode.
+So instead of writing 0xaabcc00, we'll write 0xaabbcc01.
+
+This mean we have, in memory, at the address of the original function
+   T2 bx pc
+   T2 nop (needed)
+   ARM ldr pc, [pc, #0]
+   XXXXX (4-bytes garbage)
+   <address of the new function>|1
+
+This is implemented in archos_redirect function.
+(There is some extra safekeeping with nops and canaris here, ""just in case"")
+
+Now, we have destroyed the original function's code, since we wrote ldr pc, [pc, #0] there, so we can't call this function again... We'll just call ourselves !
+
+In the redirection process, we have overriden 16 bytes. We can save them, append it a ldr pc, [pc, #0] which will jump after those 16 bytes. So we will execute the full code, and everything will be fine!
+This is not exactly, true, we can do that to only one condition: the first 16 bytes' code, must NOT rely on the actual value of pc.
+In my testing, pc was read as soon as the 8-th byte of instruction. Which leaves us 1 thumb instruction + the size of the address.
+
+I couldn't find any way to do that, so I used another trick here.
+I replaced the first instruction, by a randomly chosen instruction (namely 0xde0dee8d [1]), which would trigger a POSIX signal. (here, a SIGILL)
+This way, I only need to replace 4 bytes. Most (all?) function start by pushing registers to the stack, which is pc-independant, and takes 4 bytes, so that's perfect!
+Though, triggering a SIGILL, is only part of the job.
+Of course you have to intercept it, that's easy with sigaction function.
+And then, once your function (sigill_fnc in SampleTable-archos.cpp) is called, we need to go out of signal handler and go to our own implementation of the function.
+This isn't possible POSIX-possible, but possible on Linux: The callback (sigill_fnc) gets a third argument, getting many informations, including the value of registers.
+Those registers are the same registers which are restored once the signal handler exists.
+So, we can change the pc in this structure, and we'll just jump to our own function.
+There is still some work to be able to call original function.
+As said earlier, all that we have to do, is execute the 4 bytes, jump to original function + 4 bytes, and that's all.
+This is done by trampoline structure in SampleTable-archos.cpp (the trampoline is called from MPEG4Extractor.cpp's parseChunk).
+Using again, my beloved ldr pc, [pc, #0] instruction.
+
+This method is not used for all functions, so both methods co-exist in the code, because triggering a SIGILL means doing exchanges with kernel on all function calls, which takes a lot of time,
+consdered to a simple branch instruction.
+
+[1] For those wondering why 0xde0dee8d. I remembered my school lessons, where I had OpenOCD something alike, with 0xdeeedeee. It was an ARM code, not Thumb2, so it doesn't match, but I reproduced the same behaviour: using an inexisting coprocessor.
+
+== Other explored ways, and why it didn't work ==
+
+I tried some other ways, and failed. I consider fails as interesting as success, so here they are:
+- To callback original function, do the ldr pc, [pc, #0] trick, but then restore original beginning of the function.
+	This doesn't work because parseChunk has recursive calls, so only first layer of recursivity is redirected
+- I tried redefining the functions in libstagefright_archos.so and load the libraries ""in the right order"" so that libstagefright.so uses my own implementation
+	Android's linker is rather minimalist, and it will always use libstagefright.so's symbols first (after the executable itself, and LD_PRELOAD)
+		(and the following applies as well)
+- I tried to change the symbols I want to replace from "defined" to "unknown" in libstagefright.so, and have libstagefright.so require libstagefright_archos.so (nice trick suggested by xavierg)
+	This works only on Android 5. On earlier versions, calls from libstagefright.so to itself doesn't go through dynamic linking
+- ptrace: It requires to be in another process
